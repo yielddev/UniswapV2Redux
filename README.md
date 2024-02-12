@@ -1,66 +1,12 @@
-## Foundry
+## why does the `price0CumulativeLast` and `price1CumulativeLast` never decrement?
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+these variables represent the cumulative price of each token over time and represent a time weighted average price over a guven period. thus they are recorded by summing the current price of the token weigthed by the time since the last update. 
 
-Foundry consists of:
+## How do you write a contract that uses the oracle
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+In order to utilize the oracle in a contract you must first determine the window of time for which you want a time weighted average price of the token. Then you must record a snapshot at the beginning of the window recording the time and cumulative price at the windows start. Once the window has closed, you can record the most recent cumaltive price at the end of the window and using the difference between the recent cumulative price and the starting cumulative price divided by the time elapsed between the two price calculate the time weighted average price of the token over the time elapsed.
 
-## Documentation
+## Why are `price0CumulativeLast` and `price1CumulativeLast` stored seperately? wy not just calculate `price1cumulativeLast = 1/price0cumulativeLast`?
 
-https://book.getfoundry.sh/
+Because the variable `price0CumulativeLast` and `price1CumulativeLast` are both cumulative prices of the token over time they do not maintain the inverse relationship that the ratio of the value two tokens does and thus must be stored seperately and cannot be derived from one another by simple inversion.
 
-## Usage
-
-### Build
-
-```shell
-$ forge build
-```
-
-### Test
-
-```shell
-$ forge test
-```
-
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
