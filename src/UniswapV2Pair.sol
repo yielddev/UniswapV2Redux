@@ -7,7 +7,9 @@ import {ERC20} from "@vectorized/solady@v0.0.165/tokens/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts@v5.0.0/utils/math/Math.sol";
 import {UQ112x112} from './libraries/UQ112x112.sol';
-
+import { ReentrancyGuard } from "@openzeppelin/contracts@v5.0.0/utils/ReentrancyGuard.sol";
+import { IERC3156FlashLender } from '@openzeppelin/contracts@v5.0.0/interfaces/IERC3156FlashLender.sol';
+import { IERC3156FlashBorrower } from "@openzeppelin/contracts@v5.0.0/interfaces/IERC3156FlashBorrower.sol";
 import "forge-std/console.sol";
 // import {UQ112x112} from './libraries/UQ112x112.sol';
 
@@ -18,15 +20,19 @@ error UniswapV2__INSUFFICIENT_TOKEN0_AMOUNT();
 error UniswapV2__INSUFFICIENT_TOKEN1_AMOUNT();
 error UniswapV2__OPTMIAL_AMOUNT_GREATER_THAN_DESIRED();
 error UniswapV2__INVALID_DESTINATION();
+error UniswapV2__INVALID_TOKEN();
 error UniswapV2__INSUFFICIENT_INPUT_AMOUNT();
 error UniswapV2__INSUFFICIENT_LIQUIDITY_BURNED();
+error UniswapV2__TRANSFER_FAILED();
 error UniswapV2__EXPIRED();
 error UniswapV2__K();
-contract UniswapV2Pair is IUniswapV2Pair, ERC20{
+error UniswapV2__FlashLoanCallbackFailed();
+error UniswapV2_FlashLoanPaymentFailed();
+contract UniswapV2Pair is IUniswapV2Pair, ERC20, IERC3156FlashLender, ReentrancyGuard {
     using UQ112x112 for uint224;
     using Math for uint;
     uint public constant MINIMUM_LIQUIDITY = 10**3;
-    uint public FEE = 30;
+    uint public constant FEE = 30;
     bytes4 private constant SELECTOR = bytes4(keccak256(bytes('transfer(address,uint256)')));
 
     address public factory;
@@ -41,14 +47,6 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
     uint public price1CumulativeLast;
     uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event
 
-    uint private unlocked = 1;
-
-    modifier lock() {
-        require(unlocked == 1, 'UniswapV2: LOCKED');
-        unlocked = 0;
-        _;
-        unlocked = 1;
-    }
     function getReserves() public view returns (uint112 _reserve0, uint112 _reserve1, uint32 _blockTimestampLast) {
         _reserve0 = reserve0;
         _reserve1 = reserve1;
@@ -56,7 +54,8 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
     }
     function _safeTransfer(address token, address to, uint value) private {
         (bool success, bytes memory data) = token.call(abi.encodeWithSelector(SELECTOR, to, value));
-        require(success && (data.length == 0 || abi.decode(data, (bool))), 'UniswapV2: TRANSFER_FAILED');
+//        require(success && (data.length == 0 || abi.decode(data, (bool))), 'UniswapV2: TRANSFER_FAILED');
+        if(!success && (data.length == 0 || abi.decode(data, (bool)))) revert UniswapV2__TRANSFER_FAILED();
     }
 
     constructor() ERC20(){
@@ -108,13 +107,34 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
         }
     }
 
+    function maxFlashLoan(address token) public view returns (uint256) {
+        return IERC20(token).balanceOf(address(this));
+    }
+    function flashFee(address token, uint256 amount) public view returns (uint256) {
+        // flat rate 1000000 wei
+        return 1000000;
+    }
+    function flashLoan(
+        IERC3156FlashBorrower receiver,
+        address token,
+        uint256 amount,
+        bytes calldata data
+    ) external override returns(bool){
+        if (token != token0 && token != token1) revert UniswapV2__INVALID_TOKEN();
+        uint256 fee = flashFee(token, amount);
+        IERC20(token).transfer(address(receiver), amount);
+        if(receiver.onFlashLoan(msg.sender, token, amount, fee, data) != keccak256("ERC3156FlashBorrower.onFlashLoan")) revert UniswapV2__FlashLoanCallbackFailed();
+        if (IERC20(token).transferFrom(address(receiver), address(this), amount + fee) != true) revert UniswapV2_FlashLoanPaymentFailed();
+        return true;
+
+    }
     function mint(
         address to,
         uint amount0Desired,
         uint amount1Desired,
         uint amount0Min,
         uint amount1Min
-        ) external returns (uint liquidity) {
+        ) external nonReentrant returns (uint liquidity) {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         uint amount0;
         uint amount1;
@@ -126,7 +146,7 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
                 if (amount1Optimal < amount1Min) revert UniswapV2__INSUFFICIENT_TOKEN0_AMOUNT();
                 (amount0, amount1) = (amount0Desired, amount1Optimal);
             } else {
-                uint amount0Optimal = amount1Desired * _reserve0 / _reserve1;
+                uint amount0Optimal = (amount1Desired * _reserve0) / _reserve1;
                 // change error code
                 if (amount0Optimal > amount0Desired) revert UniswapV2__INSUFFICIENT_TOKEN1_AMOUNT();
                 if (amount0Optimal < amount0Min) revert UniswapV2__INSUFFICIENT_TOKEN1_AMOUNT();
@@ -134,8 +154,8 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
             }
         }
         // transfer in
-        ERC20(token0).transferFrom(msg.sender, address(this), amount0);
-        ERC20(token1).transferFrom(msg.sender, address(this), amount1);
+        if(!ERC20(token0).transferFrom(msg.sender, address(this), amount0)) revert UniswapV2__TRANSFER_FAILED();
+        if(!ERC20(token1).transferFrom(msg.sender, address(this), amount1)) revert UniswapV2__TRANSFER_FAILED();
 
         uint balance0 = ERC20(token0).balanceOf(address(this));
         uint balance1 = ERC20(token1).balanceOf(address(this));
@@ -148,7 +168,7 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
             liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
             _mint(address(0), MINIMUM_LIQUIDITY);
         } else {
-            liquidity = Math.min(amount0 * _totalSupply / _reserve0, amount1 * _totalSupply / _reserve1);
+            liquidity = Math.min((amount0 * _totalSupply) / _reserve0, (amount1 * _totalSupply) / _reserve1);
         }
         if (liquidity <= 0) revert UniswapV2__INSUFFICIENT_LIQUIDITY_MINTED();
         _mint(to, liquidity);
@@ -162,12 +182,9 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
         uint amount0Min,
         uint amount1Min,
         uint deadline
-        ) external returns (uint amount0, uint amount1) {
+        ) external nonReentrant returns (uint amount0, uint amount1) {
         if (block.timestamp > deadline) revert UniswapV2__EXPIRED();
-        console.log("here");
-        console.log("msg sender: ", msg.sender);
-        console.log("allowance: ", IERC20(address(this)).allowance(msg.sender, address(this)));
-        IERC20(address(this)).transferFrom(msg.sender, address(this), liquidity); // send liquidity to pair
+        if(!IERC20(address(this)).transferFrom(msg.sender, address(this), liquidity)) revert UniswapV2__TRANSFER_FAILED(); // send liquidity to pair
         console.log("here");
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         console.log("here");
@@ -188,8 +205,10 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
         if (amount0 <= 0 && amount1 <= 0) revert UniswapV2__INSUFFICIENT_LIQUIDITY_BURNED();
         _burn(address(this), liquidity);
 
-        ERC20(token0).transfer(to, amount0);
-        ERC20(token1).transfer(to, amount1);
+        _safeTransfer(token0, to, amount0);
+        _safeTransfer(token1, to, amount1);
+        // if(!ERC20(token0).transfer(to, amount0)) revert UniswapV2__TRANSFER_FAILED();
+       // if(!ERC20(token1).transfer(to, amount1)) revert UniswapV2__TRANSFER_FAILED();
         balance0 = ERC20(token0).balanceOf(address(this));
         balance1 = ERC20(token1).balanceOf(address(this));
 
@@ -204,7 +223,7 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
         address tokenIn,
         address to,
         uint deadline
-    ) external {
+    ) external nonReentrant {
         if (block.timestamp > deadline) revert UniswapV2__EXPIRED();
         uint amountInWithFee = amountIn * (10000 - FEE);
         uint reserveOut = tokenIn == token0 ? reserve1 : reserve0;
@@ -213,14 +232,14 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
         uint denominator = reserveIn * 10000 + amountInWithFee;
         uint amountOut = numerator.ceilDiv(denominator);
         if (amountOut < amountOutMin) revert UniswapV2__INSUFFICIENT_OUTPUT_AMOUNT();
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);        
+        if(!IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn)) revert UniswapV2__TRANSFER_FAILED();
         (uint amount0Out, uint amount1Out) = tokenIn == token0 ? (uint(0), amountOut) : (amountOut, uint(0));
         swap(amount0Out, amount1Out, to);
 
 
     }
     // add slippage 
-    function swap(uint amount0Out, uint amount1Out, address to) internal {
+    function swap(uint amount0Out, uint amount1Out, address to) private {
         if (amount0Out <= 0 && amount1Out <= 0) revert UniswapV2__INSUFFICIENT_OUTPUT_AMOUNT(); 
 
         (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings 
@@ -263,7 +282,7 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
         
     }
 
-    function skim(address to) external lock {
+    function skim(address to) external nonReentrant {
         //
         address _token0 = token0;
         address _token1 = token1;
@@ -272,7 +291,7 @@ contract UniswapV2Pair is IUniswapV2Pair, ERC20{
 
     }
 
-    function sync() external lock {
+    function sync() external nonReentrant {
         _update(ERC20(token0).balanceOf(address(this)), ERC20(token1).balanceOf(address(this)), reserve0, reserve1);
     }
     

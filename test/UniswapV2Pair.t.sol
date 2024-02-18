@@ -6,6 +6,8 @@ import {UniswapV2Pair} from "../src/UniswapV2Pair.sol";
 import {MockToken} from "../src/mocks/MockToken.sol";
 import {Math} from "@openzeppelin/contracts@v5.0.0/utils/math/Math.sol";
 import "forge-std/console.sol";
+import { IERC3156FlashBorrower } from "@openzeppelin/contracts@v5.0.0/interfaces/IERC3156FlashBorrower.sol";
+import { IERC3156FlashLender } from '@openzeppelin/contracts@v5.0.0/interfaces/IERC3156FlashLender.sol';
 contract UniswapV2PairTest is Test {
 
     using Math for uint256;
@@ -109,16 +111,41 @@ contract UniswapV2PairTest is Test {
         // pair.swap(0 ether, 8 ether, address(UserWallet), "");
         // pair.swap(0 ether, 8 ether, address(UserWallet), "");
     }
+    function test_FlashLoan() public {
+        setUpLiquidity();
+        MockBorrower borrower = new MockBorrower(pair, UserWallet);
+        vm.startPrank(UserWallet);
+        token0.transfer(address(borrower), 1000000);
+        pair.flashLoan(borrower, address(token0), 100 ether, "");
 
+
+    }
     // mint tests
     // test initial liq
     // test mint amounts and LPs
-
     // function test_swap()
-
     // function swap amounts
+}
 
+contract MockBorrower is IERC3156FlashBorrower {
+    IERC3156FlashLender public lender;
+    address trustedInitiator;
 
-
-
+    constructor (IERC3156FlashLender _lender, address _trustedInitiator) {
+        lender = _lender;
+        trustedInitiator = _trustedInitiator;
+    }
+    function onFlashLoan(
+        address initiator,
+        address token,
+        uint256 amount,
+        uint256 fee,
+        bytes calldata data
+    ) external override returns (bytes32) {
+        if (initiator != trustedInitiator) revert("Untrusted initiator");
+        if (msg.sender != address(lender)) revert("Untrusted lender");
+        assert(MockToken(token).balanceOf(address(this)) >= amount + fee);
+        MockToken(token).approve(address(lender), amount + fee);
+        return keccak256("ERC3156FlashBorrower.onFlashLoan");
+    }
 }
